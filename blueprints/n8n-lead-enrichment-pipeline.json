@@ -1,0 +1,170 @@
+{
+  "name": "Production Lead Enrichment & AI Personalization Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "onReceived",
+        "responseData": "allEntries",
+        "options": {}
+      },
+      "id": "1",
+      "name": "Webhook - Inbound Lead",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst cleaned = [];\n\nfor (const item of items) {\n  const data = item.json;\n  const email = (data.email || '').trim().toLowerCase();\n  const domain = email.includes('@') ? email.split('@')[1] : (data.website || '').replace(/https?:\\/\\//, '').split('/')[0];\n  \n  cleaned.push({\n    json: {\n      first_name: data.first_name || 'Prospect',\n      last_name: data.last_name || '',\n      email: email,\n      company: data.company || 'Company',\n      domain: domain,\n      notes: data.notes || '',\n      received_at: new Date().toISOString()\n    }\n  });\n}\n\nreturn cleaned;"
+      },
+      "id": "2",
+      "name": "Normalize & Extract Domain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an enterprise B2B sales strategist. Evaluate the inbound lead and return valid JSON with keys: 'qualification_score' (1-10 integer), 'is_qualified' (boolean, score >= 7), 'personalized_hook' (1-2 sentence tailored observation), 'pain_point_hypothesis' (1 sentence), and 'suggested_offer' (1 sentence).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Lead Details:\\nName: {{ $json.first_name }} {{ $json.last_name }}\\nCompany: {{ $json.company }}\\nDomain: {{ $json.domain }}\\nNotes: {{ $json.notes }}\"\n    }\n  ]\n}"
+      },
+      "id": "3",
+      "name": "AI Lead Qualification & Hook Generator",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nlet parsedAI = {};\ntry {\n  parsedAI = JSON.parse(item.choices[0].message.content);\n} catch (e) {\n  parsedAI = { is_qualified: false, qualification_score: 0, personalized_hook: '' };\n}\n\nconst normalized = $('Normalize & Extract Domain').first().json;\n\nreturn [{\n  json: {\n    ...normalized,\n    ai_analysis: parsedAI,\n    is_qualified: parsedAI.is_qualified === true\n  }\n}];"
+      },
+      "id": "4",
+      "name": "Parse Structured Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_qualified }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "5",
+      "name": "Filter Qualified Leads",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hooks.slack.com/services/REPLACE_WITH_YOUR_SLACK_WEBHOOK",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🔥 *High-Value Lead Qualified!*\\n*Name:* {{ $json.first_name }} {{ $json.last_name }}\\n*Company:* {{ $json.company }} ({{ $json.domain }})\\n*Score:* {{ $json.ai_analysis.qualification_score }}/10\\n*AI Hook:* {{ $json.ai_analysis.personalized_hook }}\\n*Pain Point:* {{ $json.ai_analysis.pain_point_hypothesis }}\"\n}"
+      },
+      "id": "6",
+      "name": "Slack Alert - Qualified Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { status: 'archived_unqualified', lead: $json.email, score: $json.ai_analysis.qualification_score } }];"
+      },
+      "id": "7",
+      "name": "Archive / Nurture Unqualified",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1360, 420]
+    }
+  ],
+  "connections": {
+    "Webhook - Inbound Lead": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Extract Domain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Extract Domain": {
+      "main": [
+        [
+          {
+            "node": "AI Lead Qualification & Hook Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Lead Qualification & Hook Generator": {
+      "main": [
+        [
+          {
+            "node": "Parse Structured Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Structured Output": {
+      "main": [
+        [
+          {
+            "node": "Filter Qualified Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Qualified Leads": {
+      "main": [
+        [
+          {
+            "node": "Slack Alert - Qualified Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Archive / Nurture Unqualified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
+
